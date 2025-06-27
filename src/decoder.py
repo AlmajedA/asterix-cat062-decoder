@@ -43,32 +43,38 @@ class Cat62Decoder:
                     present_ids.append(self.SPEC.uap[bit_index])
                 bit_index += 1
             bit_index += 1                        # skip FX
-
+        print(present_ids)
+        result = {}
 
         for id in present_ids:
             meta = self.SPEC.items[id]
+
             t = meta["type"]
             if t == "Fixed":
-                value = self._decode_fixed(meta)        # unchanged
+                pass
+                # fixed_output = self._decode_fixed(meta)
+                # result[id] = fixed_output
+
             elif t == "Variable":
                 pass
-                # value = self._decode_variable(meta)
+                # variable_output = self._decode_variable(meta)
+                # result[id] = variable_output
             elif t == "Repetitive":
+
                 pass
                 # value = self._decode_repetitive(meta)
             elif t == "Compound":
-                pass
-                # value = self._decode_compound(meta)
+                compound_output = self._decode_compound(meta)
+                result[id] = compound_output
             else:
                 raise NotImplementedError(t)
-            # break
+        print(result)
 
 
     def _decode_fixed(self, spec):
         spec_length = int(spec['length'])
         raw = self._read(spec_length)
         val = int.from_bytes(raw, "big")
-        total = spec_length * 8
         out = {}
         bits = spec['bits']
         for bit in bits:
@@ -80,15 +86,45 @@ class Cat62Decoder:
             field = (val >> shift) & ((1 << width) - 1)
             
             # if bit["signed"]:
-            #     sign = 1 << (width-1)
-            #     if field & sign:
-            #         field -= 1 << width
+            #     field = self._twos_complement(field, width)
+
             # elif bit["octal"]:
-            #     pass
+            #     field = self._octal_code(field, width)      # returns e.g. "0421"
+
             # elif bit["sixchar"]:
-            #     pass
+            #     field = self._ia5_6bit_string(field, width) # returns e.g. "AFR123 "
+
+            # if bit["scale"]:
+            #     field *= bit["scale"]
             out[bit["name"]] = field
-        print(out)
         return out
+    
+    def _decode_variable(self, spec):
+        out = []
+        for f in spec["inners"]:
+            fixed_output = self._decode_fixed(f)
+            out.append(fixed_output)
+            if fixed_output['FX'] == 0:
+                break
+
+        return out
+    
+    def _decode_compound(self, spec):
+        subs = spec["subs"]
+        out = []
+        
+        for sub in subs:
+            t = sub["type"]
+
+            if t == "Fixed":
+                fixed_output = self._decode_fixed(sub)
+                out.append(fixed_output)
+                
+            elif t == "Variable":
+                variable_output = self._decode_variable(sub)
+                out.append(variable_output)
+        return out
+    
+
 
 Cat62Decoder(data).decode()

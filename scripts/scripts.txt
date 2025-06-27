@@ -1,0 +1,1 @@
+ast-tool-py --cat 062 1.17 random | ast-tool-py custom --script scripts/custom.py --call custom | ast-tool-py decode

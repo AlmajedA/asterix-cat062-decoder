@@ -1,85 +1,95 @@
+# spec.py ─────────────────────────────────────────────────────────────
 import xml.etree.ElementTree as ET
-from pathlib import Path
 
-def _extract_bits(fixed_node):
-    """
-    Return a list of dicts, one for every <Bits …> element that lives
-    *anywhere* under the given <Fixed> node.
-    """
-    bits = []
-    for b in fixed_node.findall(".//Bits"):
-        # single bit ⇒ attribute “bit”
-        if "bit" in b.attrib:               # e.g. <Bits bit="16">
-            start = end = int(b.attrib["bit"])
-        else:                               # bit range ⇒ “from … to …”
-            start = int(b.attrib["from"])
-            end   = int(b.attrib["to"])
-        
-        if start < end:                      
-            start, end = end, start
-
-        bits.append(
-            {
-                "name": (
-                    b.findtext("BitsShortName")
-                    or b.findtext("BitsName")
-                    or f"{start}"
-                ),
-                "start": start,
-                "end":   end,
-                "signed":  b.attrib.get("encode") == "signed",
-                "octal":   b.attrib.get("encode") == "octal",
-                "sixchar": b.attrib.get("encode") == "6bitschar",
-                "scale": (
-                    float(b.find("BitsUnit").attrib["scale"])
-                    if b.find("BitsUnit") is not None
-                    else None
-                ),
-            }
-        )
-    return bits
-
-def _fixed_meta(fixed_xml):
-    """Return {'length': int, 'bits': list[…]} for ONE <Fixed>."""
+# ── helper #1 : turn one <Fixed> into meta-dict ──────────────────────
+def _fixed_meta(fx: ET.Element) -> dict:
     return {
-        "length": int(fixed_xml.attrib["length"]),
-        "bits":   _extract_bits(fixed_xml),
+        "type":  "Fixed",
+        "length": int(fx.attrib["length"]),
+        "bits":  _extract_bits(fx),
     }
 
+# ── helper #2 : extract every <Bits> field inside one <Fixed> ───────
+def _extract_bits(fx: ET.Element) -> list[dict]:
+    out = []
+    for b in fx.findall(".//Bits"):
+        # locate the bit range
+        if "bit" in b.attrib:                # single bit
+            start = end = int(b.attrib["bit"])
+        else:                                # range
+            start = int(b.attrib["from"])
+            end   = int(b.attrib["to"])
+        if start < end:                      # normalise to start ≥ end
+            start, end = end, start
 
+        out.append({
+            "name"   : b.findtext("BitsShortName")
+                       or b.findtext("BitsName")
+                       or f"bit{start}",
+            "start"  : start,
+            "end"    : end,
+            "signed" : b.attrib.get("encode") == "signed",
+            "octal"  : b.attrib.get("encode") == "octal",
+            "sixchar": b.attrib.get("encode") == "6bitschar",
+            "scale"  : (
+                float(b.find("BitsUnit").attrib["scale"])
+                if b.find("BitsUnit") is not None else None
+            ),
+        })
+    return out
+
+# ── helper #3 : create meta for Fixed / Variable / Repetitive ───────
+def _format_meta(node: ET.Element) -> dict:
+    tag = node.tag
+    if tag == "Fixed":
+        return _fixed_meta(node)
+
+    if tag in ("Variable", "Repetitive"):
+        inners = [_fixed_meta(fx) for fx in node.findall("Fixed")]
+        return {"type": tag, "inners": inners}
+
+    raise ValueError(f"Unexpected tag <{tag}> inside Compound")
+
+# ── main Cat62Spec class ─────────────────────────────────────────────
 class Cat62Spec:
-    def __init__(self, xml_path):
+    """Parse CAT-62 XML (inline compound children, no <DataItemRef>)."""
+
+    def __init__(self, xml_path: str) -> None:
         root = ET.parse(xml_path).getroot()
-        self.uap = [e.text.strip()
-                    for e in root.find("UAP").findall("UAPItem")
-                    ]
 
-        self.items = {}
+        # --- UAP: needed for FSPEC → ID mapping ----------------------
+        self.uap = [
+            e.text.strip()
+            for e in root.find("UAP").findall("UAPItem")
+        ]
+
+        self.items: dict[str, dict] = {}
+
+        # --- walk every <DataItem> -----------------------------------
         for di in root.findall("DataItem"):
-            id_ = di.attrib["id"]
-            fmt_node = di.find("DataItemFormat")[0]
-            fmt_type = fmt_node.tag
+            did      = di.attrib["id"]
+            fmt_node = di.find("DataItemFormat")[0]   # first child
+            tag      = fmt_node.tag
 
-            entry = {"type": fmt_type, "xml": di, "fmt": fmt_node}
+            meta: dict = {"type": tag}
 
-            if fmt_type == "Fixed":
-                entry["length"] = int(fmt_node.attrib["length"])
-                entry["bits"]   = _extract_bits(fmt_node)
+            if tag == "Fixed":
+                meta.update(_fixed_meta(fmt_node))
 
-            elif fmt_type == "Variable":
-                inner_fixes = [_fixed_meta(fx) for fx in fmt_node.findall("Fixed")]
-                entry["inners"] = inner_fixes          # now a list of 1…N dicts
+            elif tag in ("Variable", "Repetitive"):
+                meta["inners"] = [_fixed_meta(fx)
+                                 for fx in fmt_node.findall("Fixed")]
 
-            elif fmt_type == "Repetitive":
-                inner_fixes = [_fixed_meta(fx) for fx in fmt_node.findall("Fixed")]
-                entry["inners"] = inner_fixes          # same structure
+            elif tag == "Compound":
+                subs = []
+                for child in fmt_node:
+                    if child.tag == "Indicator":      # bitmap description → skip
+                        continue
+                    subs.append(_format_meta(child))  # Fixed / Variable / Repetitive
+                meta["subs"] = subs
 
-            elif fmt_type == "Compound":
-                entry["sub_ids"] = [
-                    ref.attrib["id"] for ref in fmt_node.findall("DataItemRef")
-                ]
+            self.items[did] = meta
 
-            self.items[id_] = entry
-
+    # convenience getter
     def get_data_items(self):
         return self.items
