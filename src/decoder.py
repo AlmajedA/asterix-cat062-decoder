@@ -247,25 +247,15 @@ class Cat62Decoder:
         def _indent(level: int) -> str:
             return " " * (indent * level)
 
-        def _fmt_hex(byte_seq: bytes) -> str:
-            return byte_seq.hex()
-
-        def _fmt_bin(value: int, width: int) -> str:
-            bits = format(value, f"0{width}b")
-            # group as “xxxx xxxx …”
-            return " ".join(bits[i : i + 8] for i in range(0, width, 8))
 
         def _print_field(path: List[str], meta: Dict[str, Any], val: Any, lvl: int) -> None:
             """Recursive helper for Fixed / Variable / Repetitive structures."""
             name_path = "', '".join(path)
             print(f"{_indent(lvl)}['{name_path}']: \"{meta.get('desc', '')}\"")
-
             if meta["type"] == "Fixed":
                 width = meta["length"] * 8
                 raw_int = val["__raw__"] if isinstance(val, dict) and "__raw__" in val else None
-                if raw_int is not None:
-                    print(f"{_indent(lvl+1)}len={width} bits, bin={_fmt_bin(raw_int, width)}")
-
+                
                 for bit_meta in meta["bits"]:
                     fld_name = bit_meta["name"]
                     field_val = val.get(fld_name)
@@ -300,16 +290,12 @@ class Cat62Decoder:
 
         # ------------- main loop over records --------------------------
         for rec_idx, record in enumerate(records):
-            raw_slice = b""  # placeholder – fill if you kept raw bytes per record
             if show_raw_hex:
-                print(
-                    f"record #{rec_idx}: len={len(raw_slice)} bytes, "
-                    f"hex={_fmt_hex(raw_slice)}"
-                )
+                print(f"record #{rec_idx}")
 
             for item_id, item_val in record.items():
                 meta = self._spec.items[item_id]
                 _print_field([item_id], meta, item_val, lvl=0)
 
-            print()  # blank line between records
+            print() 
 

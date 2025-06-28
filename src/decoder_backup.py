@@ -1,5 +1,4 @@
 from struct import unpack_from
-from typing import Dict, Any, List
 from src.spec import Cat62Spec
 
 with open('data.txt', 'r') as file:
@@ -24,14 +23,17 @@ class Cat62Decoder:
     
     def decode(self):
         cat = self._read(1)[0]
+
         if cat != 62:
             raise ValueError("Not CAT-62")
         length = self._get_length(self._read(2))
+
         assert length == len(self.raw), "length field mismatch"
-        final_result = []
+
+        records = []
 
         while self.p != length:
-            result = {}
+            record = {}
             fspec_octets = []
             while True:
                 oc = self._read(1)[0]
@@ -47,27 +49,27 @@ class Cat62Decoder:
                         present_ids.append(self.SPEC.uap[bit_index])
                     bit_index += 1
                 bit_index += 1                        # skip FX
-            print(present_ids)
 
             for id in present_ids:
                 meta = self.SPEC.items[id]
                 t = meta["type"]
                 if t == "Fixed":
                     fixed_output = self._decode_fixed(meta)
-                    result[id] = fixed_output
+                    record[id] = fixed_output
 
                 elif t == "Variable":
                     variable_output = self._decode_variable(meta)
-                    result[id] = variable_output
+                    record[id] = variable_output
                 elif t == "Compound":
                 
                     compound_output = self._decode_compound(meta)
-                    result[id] = compound_output
-                else:
-                    raise NotImplementedError(t)
-            
-            final_result.append(result)
+                    record[id] = compound_output
 
+
+            
+            records.append(record)
+        return records
+        
     def _decode_fixed(self, spec):
         spec_length = int(spec['length'])
         raw = self._read(spec_length)
@@ -80,34 +82,31 @@ class Cat62Decoder:
             bit_end = int(bit['end'])
             width = bit_start - bit_end + 1
             shift  = bit_end - 1
-            field = (val >> shift) & ((1 << width) - 1)
+            x = (val >> shift) & ((1 << width) - 1)
             
-            # if bit["signed"]:
-            #     field = self._twos_complement(field, width)
+            if bit["signed"]:
+                sign = 1 << (width - 1)
+                if x & sign:
+                    x -= 1 << width
+            elif bit["octal"]:
+                x = format(x, f"0{width//3}o")
+            elif bit["sixchar"]:
+                chars = [chr(((x >> (6*i)) & 0x3F) + 0x20)
+                         for i in range((width // 6) - 1, -1, -1)]
+                x = "".join(chars).rstrip()
 
-            # elif bit["octal"]:
-            #     field = self._octal_code(field, width)      # returns e.g. "0421"
+            if bit["scale"]:
+                x *= bit["scale"]
 
-            # elif bit["sixchar"]:
-            #     field = self._ia5_6bit_string(field, width) # returns e.g. "AFR123 "
-
-            # if bit["scale"]:
-            #     field *= bit["scale"]
-            out[bit["name"]] = field
+            out[bit["name"]] = x
         return out
     
     def _decode_variable(self, spec, *, need_presence=False):
-        """
-        Decode a <Variable> item that may have 1..N extents.
-        Works for both:
-        • presence-vector variables with several different 1-byte templates
-        • repeat-the-same-template variables (e.g. I062/510, 3-byte blocks)
-        """
         inners = spec["inners"]
         n_tmpl = len(inners)
 
-        octets_out: list[dict] = []
-        presence  : list[bool] = []
+        octets_out = []
+        presence = []
 
         idx = 0                       # which inner template to use next
         while True:
@@ -130,13 +129,11 @@ class Cat62Decoder:
                 idx = 0
             else:                     # multi-template presence vector
                 idx += 1
-                if idx >= n_tmpl:
-                    raise ValueError("FX=1 but no further <Fixed> template in XML")
 
         return (octets_out, presence) if need_presence else octets_out
+    
     def _decode_repetitive(self, spec):
         rep_time = self._read(1)[0]
-        print(rep_time)
         out = []
         inner_spec = spec["inners"][0]
         for i in range(rep_time):
@@ -145,38 +142,141 @@ class Cat62Decoder:
         return out
 
     
+        # ───────────────────────── Compound format ──────────────────────────
     def _decode_compound(self, spec):
-        subs = spec["subs"]      # [Variable-hdr, sub-1, sub-2, …]
-        out  = {}
+        """
+        Decode a Compound data-item.
 
-        # ── step 1 · decode the primary variable header ─────────────────
-        var_meta     = subs[0]
-        var_decoded, presence = self._decode_variable(var_meta, need_presence=True)
-        out["HDR"]   = var_decoded     # keep the header itself
+        * Header (variable presence vector) is stored under key "HDR".
+        * Each present sub-item is stored under the short-name of the header
+          bit that announced it, rather than a numeric position.
+        """
+        subs = spec["subs"]             # [Variable-HDR, sub-1, sub-2, …]
 
-        # ── step 2 · walk through the rest, guided by ‘presence’ flags ──
-        sub_idx = 1        # current entry in subs[1:]
-        for present in presence:
-            if sub_idx >= len(subs):           # XML spare bits possible
+        # -------- 1. decode the presence vector ------------------------
+        hdr_meta        = subs[0]                       # Variable
+        hdr_exts, flags = self._decode_variable(hdr_meta, need_presence=True)
+        out             = {"HDR": hdr_exts}
+
+        # Build the list of header-bit names in the same order as *flags*
+        bit_names = []
+        for inner in hdr_meta["inners"]:
+            for b in inner["bits"]:
+                if b["name"] != "FX":
+                    bit_names.append(b["name"])
+
+        # -------- 2. walk through the remaining sub-fields -------------
+        for idx, (present, bit_name) in enumerate(zip(flags, bit_names), start=1):
+            if idx >= len(subs):        # spare bits beyond defined subs
                 break
+            if not present:
+                continue
 
-            if present:                        # only when bit == 1
-                sub_spec = subs[sub_idx]
-                t        = sub_spec["type"]
+            sub_meta = subs[idx]
+            t        = sub_meta["type"]
 
-                if   t == "Fixed":
-                    out[sub_idx] = self._decode_fixed(sub_spec)
-                elif t == "Variable":
-                    out[sub_idx] = self._decode_variable(sub_spec)
-                elif t == "Repetitive":
-                    out[sub_idx] = self._decode_repetitive(sub_spec)
-                else:
-                    raise NotImplementedError(t)
-
-            sub_idx += 1                       # advance to next sub-field
+            if   t == "Fixed":
+                out[bit_name] = self._decode_fixed(sub_meta)
+            elif t == "Variable":
+                out[bit_name] = self._decode_variable(sub_meta)
+            elif t == "Repetitive":
+                out[bit_name] = self._decode_repetitive(sub_meta)
 
         return out
+
     
+    def pprint(self, records):
+        for record in records:
+            for reference_number, data_item in record.items():
+                print(self.SPEC.items[reference_number])
+                print(reference_number, data_item)
+    
+    # ─────────────────────────── pretty tree ────────────────────────────
+    def pretty(self, records, indent=2):
+        """Print decoded records using full Data-Item & Bit names."""
+
+        pad = lambda lvl: " " * (lvl * indent)
+
+        def title(item_id, meta):
+            return f"[{item_id}] {meta.get('full_name','')}"
+
+        # -------- Fixed -------------------------------------------------
+        def show_fixed(item_id, meta, val, lvl):
+            print(f"{pad(lvl)}{title(item_id, meta)}")
+            for bit in meta["bits"]:
+                n_short = bit["name"]
+                n_full  = bit["full_name"]
+                v       = val.get(n_short)
+                print(f"{pad(lvl+1)}• {n_full}: {v}")
+
+        # -------- Variable ---------------------------------------------
+        def show_variable(item_id, meta, val, lvl):
+            print(f"{pad(lvl)}{title(item_id, meta)}")
+            inner = meta["inners"][0]
+            for i, ext in enumerate(val):
+                print(f"{pad(lvl+1)}extent {i}:")
+                show_fixed(f"{item_id}.{i}", inner, ext, lvl+2)
+
+        # -------- Repetitive -------------------------------------------
+        def show_repetitive(item_id, meta, val, lvl):
+            print(f"{pad(lvl)}{title(item_id, meta)}")
+            inner = meta["inners"][0]
+            for i, rep in enumerate(val):
+                show_fixed(f"{item_id}.{i}", inner, rep, lvl+1)
+
+                # -------- Compound ---------------------------------------------
+        def show_compound(item_id, meta, val, lvl):
+            print(f"{pad(lvl)}{title(item_id, meta)}")
+
+            subs = meta["subs"]          # [Variable-HDR, sub-1, sub-2, …]
+
+            # ── 1) header vector (always first sub when present) ───────
+            hdr_present = subs and subs[0]["type"] == "Variable"
+            it = iter(subs)
+
+            if hdr_present:
+                hdr_meta = next(it)
+                show_variable(f"{item_id}.HDR", hdr_meta, val["HDR"], lvl+1)
+
+                # Build the *short names* in header-bit order
+                bit_names = []
+                for inner in hdr_meta["inners"]:
+                    for b in inner["bits"]:
+                        if b["name"] != "FX":
+                            bit_names.append(b["name"])
+                names_iter = iter(bit_names)
+            else:
+                names_iter = iter([])    # no header → no presence vector
+
+            # ── 2) remaining sub-fields, keyed by short name ───────────
+            for sub_meta in it:
+                try:
+                    key = next(names_iter)
+                except StopIteration:
+                    key = "?"            # spare / undefined bits
+
+                if key in val:           # only show if actually present
+                    show_any(f"{item_id}.{key}", sub_meta, val[key], lvl+1)
+
+        # -------- dispatcher -------------------------------------------
+        def show_any(item_id, meta, val, lvl):
+            t = meta["type"]
+            if t == "Fixed":
+                show_fixed(item_id, meta, val, lvl)
+            elif t == "Variable":
+                show_variable(item_id, meta, val, lvl)
+            elif t == "Repetitive":
+                show_repetitive(item_id, meta, val, lvl)
+            elif t == "Compound":
+                show_compound(item_id, meta, val, lvl)
+
+        # -------- walk every record ------------------------------------
+        for r, rec in enumerate(records, 1):
+            print(f"Record #{r}")
+            for item_id, item_val in rec.items():
+                show_any(item_id, self.SPEC.items[item_id], item_val, 1)
+            print()
 
 
-Cat62Decoder(data).decode()
+
+
