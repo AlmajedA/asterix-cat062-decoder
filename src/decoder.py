@@ -1,176 +1,315 @@
+from __future__ import annotations
+
+import logging
 from struct import unpack_from
-from typing import Dict, Any, List
+from typing import Any, Dict, List, Union, Tuple
+
 from src.spec import Cat62Spec
 
-with open('data.txt', 'r') as file:
-        data = file.read()
-        
-data = bytes.fromhex(data)
+logger = logging.getLogger(__name__)
 
-xml_path = "xmls/asterix_cat062_1_17.xml"
+
 class Cat62Decoder:
-    def __init__(self, raw: bytes):
-        self.raw = raw
-        self.p = 0          # read pointer
-        self.SPEC = Cat62Spec(xml_path)
+    """Decode one **byte string** that may contain *several* CAT-62 records."""
 
-    def _read(self, n):
-        chunk = self.raw[self.p:self.p+n]
-        self.p += n
+    # --------------------------------------------------------------------- init
+    def __init__(self, raw: bytes, spec: Cat62Spec) -> None:
+        self._raw = raw
+        self._pos = 0                       # cursor into self._raw
+        self._spec = spec
+
+    # ----------------------------------------------------------------- helpers
+    def _read(self, n: int) -> bytes:
+        """Return *n* bytes and advance cursor."""
+        if self._pos + n > len(self._raw):
+            raise ValueError("unexpected end-of-buffer")
+        chunk = self._raw[self._pos : self._pos + n]
+        self._pos += n
         return chunk
-    
-    def _get_length(self, length_data):
-         return int.from_bytes(length_data, "big")
-    
-    def decode(self):
-        cat = self._read(1)[0]
-        if cat != 62:
-            raise ValueError("Not CAT-62")
-        length = self._get_length(self._read(2))
-        assert length == len(self.raw), "length field mismatch"
-        fspec_octets = []
+
+    def _read_u8(self) -> int:
+        val, = unpack_from(">B", self._raw, self._pos)
+        self._pos += 1
+        return val
+
+    def _read_u16(self) -> int:
+        val, = unpack_from(">H", self._raw, self._pos)
+        self._pos += 2
+        return val
+
+    # ------------------------------------------------------------------ public
+    def decode(self) -> List[Dict[str, Any]]:
+        """Decode *all* CAT-62 packets contained in *raw*."""
+        records: List[Dict[str, Any]] = []
+
+        while self._pos < len(self._raw):
+            records.append(self._decode_one_record())
+
+        return records
+
+    # ------------------------------------------------------------------ record
+    def _decode_one_record(self) -> Dict[str, Any]:
+        """Decode exactly one CAT-62 record and return a dict of data items."""
+        category = self._read_u8()
+        if category != 62:
+            raise ValueError(f"expected CAT-62, got CAT-{category}")
+
+        length   = self._read_u16()
+        record_end = self._pos + length - 3   # 3 bytes already consumed
+
+        fspec_octets = self._read_fspec()
+        item_ids     = self._map_fspec_to_items(fspec_octets)
+
+        record: Dict[str, Any] = {}
+        for item_id in item_ids:
+            meta = self._spec.items[item_id]
+            record[item_id] = self._decode_item(meta)
+
+        # ensure we consumed exactly this record
+        if self._pos != record_end:
+            # skip any spare bytes to stay in sync but log a warning
+            logger.warning("cursor mis-aligned: skipping %d spare bytes",
+                           record_end - self._pos)
+            self._pos = record_end
+
+        return record
+
+    # ----------------------------------------------------------- FSPEC helpers
+    def _read_fspec(self) -> List[int]:
+        """Return a list of FSPEC octets (integers)."""
+        octets: List[int] = []
         while True:
-            oc = self._read(1)[0]
-            fspec_octets.append(oc)
-            if oc & 1 == 0:      # FX == 0
+            oc = self._read_u8()
+            octets.append(oc)
+            if oc & 0x01 == 0:          # FX bit cleared → last octet
                 break
+        return octets
 
-        bit_index = 0
-        present_ids = []
+    def _map_fspec_to_items(self, fspec_octets: List[int]) -> List[str]:
+        """Translate FSPEC bitmap to a list of Data-Item IDs (strings)."""
+        present: List[str] = []
+        bit_index = 0                   # current UAP position
+
         for oc in fspec_octets:
-            for bit in range(7):                    # bits 8..2
-                if oc & (1 << (7 - bit)):    
-                    present_ids.append(self.SPEC.uap[bit_index])
+            for local in range(7):      # bits 8…2
+                if oc & (1 << (7 - local)):
+                    present.append(self._spec.uap[bit_index])
                 bit_index += 1
-            bit_index += 1                        # skip FX
-        print(present_ids)
-        result = {}
+            bit_index += 1              # skip FX slot
 
-        for id in present_ids:
-            meta = self.SPEC.items[id]
-            t = meta["type"]
-            if t == "Fixed":
-                fixed_output = self._decode_fixed(meta)
-                result[id] = fixed_output
+        return present
 
-            elif t == "Variable":
-                variable_output = self._decode_variable(meta)
-                result[id] = variable_output
-            elif t == "Compound":
-            
-                compound_output = self._decode_compound(meta)
-                result[id] = compound_output
-            else:
-                raise NotImplementedError(t)
-            
-            
-            
-        print(result)
-        print(self.p)
-        print(length)
+    # ----------------------------------------------------------- item decoder
+    def _decode_item(self, meta: Dict[str, Any]) -> Any:
+        dispatch = {
+            "Fixed"      : self._decode_fixed,
+            "Variable"   : self._decode_variable,
+            "Compound"   : self._decode_compound,
+        }
+        try:
+            return dispatch[meta["type"]](meta)  # type: ignore[arg-type]
+        except KeyError:
+            raise NotImplementedError(meta["type"])
 
-    def _decode_fixed(self, spec):
-        spec_length = int(spec['length'])
-        raw = self._read(spec_length)
-        val = int.from_bytes(raw, "big")
-        out = {}
-        bits = spec['bits']
-        for bit in bits:
+    # ------------------------------------------------ Fixed (single template)
+    def _decode_fixed(self, meta: Dict[str, Any]) -> Dict[str, Any]:
+        """Decode a Fixed-length item according to *meta*."""
+        raw   = self._read(meta["length"])
+        value = int.from_bytes(raw, "big")
 
-            bit_start = int(bit['start'])
-            bit_end = int(bit['end'])
-            width = bit_start - bit_end + 1
-            shift  = bit_end - 1
-            field = (val >> shift) & ((1 << width) - 1)
-            
-            # if bit["signed"]:
-            #     field = self._twos_complement(field, width)
+        result: Dict[str, Any] = {}
+        for field in meta["bits"]:
+            start, end = field["start"], field["end"]
+            width      = start - end + 1
+            shift      = end - 1
+            mask       = (1 << width) - 1
+            x          = (value >> shift) & mask
 
-            # elif bit["octal"]:
-            #     field = self._octal_code(field, width)      # returns e.g. "0421"
+            # post-processing
+            if field["signed"]:
+                sign = 1 << (width - 1)
+                if x & sign:
+                    x -= 1 << width
+            elif field["octal"]:
+                digits = width // 3
+                x = format(x, f"0{digits}o")
+            elif field["sixchar"]:
+                chars = [chr(((x >> (6*i)) & 0x3F) + 0x20)
+                         for i in range((width // 6) - 1, -1, -1)]
+                x = "".join(chars).rstrip()
 
-            # elif bit["sixchar"]:
-            #     field = self._ia5_6bit_string(field, width) # returns e.g. "AFR123 "
+            if field["scale"]:
+                x *= field["scale"]
 
-            # if bit["scale"]:
-            #     field *= bit["scale"]
-            out[bit["name"]] = field
-        return out
-    
-    # def _decode_variable(self, spec):
-    #     out = []
-    #     for f in spec["inners"]:
-    #         fixed_output = self._decode_fixed(f)
-    #         out.append(fixed_output)
-    #         if fixed_output['FX'] == 0:
-    #             break
+            result[field["name"]] = x
+        return result
 
-    #     return out
-    def _decode_variable(self, spec, *, need_presence=False):
-        """Return a list of decoded octets plus, optionally, a list of 1/0
-        presence flags that correspond to bits 8…2, 8…2, …  (FX omitted)."""
-        octets_out: List[Dict[str, Any]] = []
-        presence:   List[bool]           = []
+    # ------------------------------------------------ Variable (1…N extents)
+    def _decode_variable(
+        self,
+        meta: Dict[str, Any],
+        *,                        # force keyword
+        need_presence: bool = False
+    ) -> Union[
+            List[Dict[str, Any]],              # default return
+            Tuple[List[Dict[str, Any]],        # when need_presence=True
+                List[bool]]
+        ]:
+        """
+        Decode a <Variable> item that may consist of 1‥N extents.
 
-        for inner in spec["inners"]:
-            # decode this 1-octet <Fixed> header --------------------------
-            octet = self._decode_fixed(inner)
-            octets_out.append(octet)
+        Parameters
+        ----------
+        meta : mapping produced by spec.py
+            Must contain key ``"inners"`` – a list of Fixed-template dicts.
+        need_presence : bool, default False
+            If True, also returns a flat list of booleans that correspond to
+            bits 8…2, 8…2, … of the templates (FX bits omitted).  This is used
+            by compound items to decide which sub-fields follow.
 
-            # build the presence mask (bit-order is already 8→1 in XML)
+        Returns
+        -------
+        list[dict]
+            One decoded dict per extent, **or**
+        (list[dict], list[bool])
+            If *need_presence* was True.
+        """
+        inners = meta["inners"]
+        n_tpl  = len(inners)
+
+        extents:   List[Dict[str, Any]] = []
+        presence:  List[bool]           = []
+
+        idx = 0                                 # template index
+        while True:
+            tmpl   = inners[idx]
+            extent = self._decode_fixed(tmpl)
+            extents.append(extent)
+
             if need_presence:
-                for meta in inner["bits"]:
-                    if meta["name"] != "FX":                 # skip the extension bit
-                        presence.append(octet[meta["name"]] == 1)
+                for field in tmpl["bits"]:
+                    if field["name"] != "FX":    # ignore extension flag
+                        presence.append(extent[field["name"]] == 1)
 
-            # stop if FX == 0
-            if octet["FX"] == 0:
+            # ── done?  FX == 0  → stop
+            if extent["FX"] == 0:
                 break
 
-        return (octets_out, presence) if need_presence else octets_out
-    def _decode_repetitive(self, spec):
-        rep_time = self._read(1)[0]
-        print(rep_time)
-        out = []
-        inner_spec = spec["inners"][0]
-        for i in range(rep_time):
-            fixed_output = self._decode_fixed(inner_spec)
-            out.append(fixed_output)
+            # ── choose next template
+            idx = 0 if n_tpl == 1 else idx + 1
+            if idx >= n_tpl:
+                raise ValueError(
+                    "FX=1 but no further <Fixed> template defined in XML"
+                )
+
+        return (extents, presence) if need_presence else extents
+
+    # ------------------------------------------------ Compound (indicator map)
+    def _decode_compound(self, meta: Dict[str, Any]) -> Dict[str, Any]:
+        """Decode a Compound item (indicator bitmap + sub-fields)."""
+        indicator_ext, present_flags = self._decode_variable(
+            meta["subs"][0], need_presence=True
+        )
+
+        out: Dict[str, Any] = {"HDR": indicator_ext}
+        subs_iter = iter(meta["subs"][1:])
+        for flag in present_flags:
+            try:
+                sub_meta = next(subs_iter)
+            except StopIteration:
+                break
+            if flag:
+                out[sub_meta.get("id", len(out))] = self._decode_item(sub_meta)
         return out
-
     
-    def _decode_compound(self, spec):
-        subs = spec["subs"]      # [Variable-hdr, sub-1, sub-2, …]
-        out  = {}
+    # ------------------------------------------------------------------ pretty-printer
+    def pprint_records(
+        self,
+        records: List[Dict[str, Any]],
+        *,
+        show_raw_hex: bool = False,
+        indent: int = 2,
+    ) -> None:
+        """
+        Nicely print CAT-62 records to stdout.
 
-        # ── step 1 · decode the primary variable header ─────────────────
-        var_meta     = subs[0]
-        var_decoded, presence = self._decode_variable(var_meta, need_presence=True)
-        out["HDR"]   = var_decoded     # keep the header itself
+        Parameters
+        ----------
+        records : list[dict]
+            The list produced by ``Cat62Decoder.decode()``.
+        show_raw_hex : bool, default False
+            If True, prints one “record: len=… hex=…” line (like in your
+            example) before each record tree.
+        indent : int, default 2
+            Number of spaces per indentation level.
+        """
 
-        # ── step 2 · walk through the rest, guided by ‘presence’ flags ──
-        sub_idx = 1        # current entry in subs[1:]
-        for present in presence:
-            if sub_idx >= len(subs):           # XML spare bits possible
-                break
+        def _indent(level: int) -> str:
+            return " " * (indent * level)
 
-            if present:                        # only when bit == 1
-                sub_spec = subs[sub_idx]
-                t        = sub_spec["type"]
+        def _fmt_hex(byte_seq: bytes) -> str:
+            return byte_seq.hex()
 
-                if   t == "Fixed":
-                    out[sub_idx] = self._decode_fixed(sub_spec)
-                elif t == "Variable":
-                    out[sub_idx] = self._decode_variable(sub_spec)
-                elif t == "Repetitive":
-                    out[sub_idx] = self._decode_repetitive(sub_spec)
+        def _fmt_bin(value: int, width: int) -> str:
+            bits = format(value, f"0{width}b")
+            # group as “xxxx xxxx …”
+            return " ".join(bits[i : i + 8] for i in range(0, width, 8))
+
+        def _print_field(path: List[str], meta: Dict[str, Any], val: Any, lvl: int) -> None:
+            """Recursive helper for Fixed / Variable / Repetitive structures."""
+            name_path = "', '".join(path)
+            print(f"{_indent(lvl)}['{name_path}']: \"{meta.get('desc', '')}\"")
+
+            if meta["type"] == "Fixed":
+                width = meta["length"] * 8
+                raw_int = val["__raw__"] if isinstance(val, dict) and "__raw__" in val else None
+                if raw_int is not None:
+                    print(f"{_indent(lvl+1)}len={width} bits, bin={_fmt_bin(raw_int, width)}")
+
+                for bit_meta in meta["bits"]:
+                    fld_name = bit_meta["name"]
+                    field_val = val.get(fld_name)
+                    _print_field(path + [fld_name], bit_meta, field_val, lvl + 2)
+
+            elif meta["type"] == "Variable":
+                for idx, extent in enumerate(val):
+                    print(f"{_indent(lvl+1)}extent {idx}:")
+                    for f_meta in meta["inners"][0]["bits"]:
+                        _print_field(path + [f"({idx})"], f_meta, extent[f_meta["name"]], lvl + 2)
+
+            elif meta["type"] == "Repetitive":
+                for idx, rep in enumerate(val):
+                    print(f"{_indent(lvl+1)}subitem ({idx})")
+                    inner_meta = meta["inners"][0]
+                    for f_meta in inner_meta["bits"]:
+                        _print_field(path + [f"({idx})"], f_meta, rep[f_meta["name"]], lvl + 2)
+            elif meta["type"] == "Compound":
+                # header
+                hdr_meta = meta["subs"][0]
+                _print_field(path + ["HDR"], hdr_meta, val["HDR"], lvl + 1)
+                # sub-fields
+                for idx, sub_meta in enumerate(meta["subs"][1:], start=1):
+                    if idx in val:  # present
+                        _print_field(path + [str(idx)], sub_meta, val[idx], lvl + 1)
+
+            else:  # leaf value
+                if isinstance(val, (int, float, str)):
+                    print(f"{_indent(lvl+1)}Element: value: {val}")
                 else:
-                    raise NotImplementedError(t)
+                    print(f"{_indent(lvl+1)}{val}")
 
-            sub_idx += 1                       # advance to next sub-field
+        # ------------- main loop over records --------------------------
+        for rec_idx, record in enumerate(records):
+            raw_slice = b""  # placeholder – fill if you kept raw bytes per record
+            if show_raw_hex:
+                print(
+                    f"record #{rec_idx}: len={len(raw_slice)} bytes, "
+                    f"hex={_fmt_hex(raw_slice)}"
+                )
 
-        return out
-    
+            for item_id, item_val in record.items():
+                meta = self._spec.items[item_id]
+                _print_field([item_id], meta, item_val, lvl=0)
 
+            print()  # blank line between records
 
-Cat62Decoder(data).decode()
