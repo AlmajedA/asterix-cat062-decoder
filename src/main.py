@@ -11,9 +11,9 @@ def main() -> None:
     raw  = bytes.fromhex(Path("data.txt").read_text())
     decoder = Cat62Decoder(raw)
     records = decoder.decode()
-    # print(records)
+    print(records)
 
-    decoder.pretty(records)
+    # decoder.pretty(records)
     # print(records)
     
 

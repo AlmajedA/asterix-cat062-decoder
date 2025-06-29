@@ -91,9 +91,20 @@ class Cat62Decoder:
             elif bit["octal"]:
                 x = format(x, f"0{width//3}o")
             elif bit["sixchar"]:
-                chars = [chr(((x >> (6*i)) & 0x3F) + 0x20)
-                         for i in range((width // 6) - 1, -1, -1)]
-                x = "".join(chars).rstrip()
+                chars = []
+                for i in range((width // 6) - 1, -1, -1):
+                    chunk = (x >> (6 * i)) & 0x3F          # next 6-bit value
+
+                    if 1 <= chunk <= 26:                   # A-Z
+                        chars.append(chr(chunk + 64))
+                    elif chunk == 32:                      # space
+                        chars.append(' ')
+                    elif 48 <= chunk <= 57:                # 0-9
+                        chars.append(chr(chunk))
+                    # all other codes are ignored
+
+                x = ''.join(chars).rstrip()
+
 
             if bit["scale"]:
                 x *= bit["scale"]
@@ -144,30 +155,20 @@ class Cat62Decoder:
     
         # ───────────────────────── Compound format ──────────────────────────
     def _decode_compound(self, spec):
-        """
-        Decode a Compound data-item.
+        subs = spec["subs"]       
 
-        * Header (variable presence vector) is stored under key "HDR".
-        * Each present sub-item is stored under the short-name of the header
-          bit that announced it, rather than a numeric position.
-        """
-        subs = spec["subs"]             # [Variable-HDR, sub-1, sub-2, …]
-
-        # -------- 1. decode the presence vector ------------------------
-        hdr_meta        = subs[0]                       # Variable
+        hdr_meta        = subs[0]  
         hdr_exts, flags = self._decode_variable(hdr_meta, need_presence=True)
         out             = {"HDR": hdr_exts}
 
-        # Build the list of header-bit names in the same order as *flags*
         bit_names = []
         for inner in hdr_meta["inners"]:
             for b in inner["bits"]:
                 if b["name"] != "FX":
                     bit_names.append(b["name"])
 
-        # -------- 2. walk through the remaining sub-fields -------------
         for idx, (present, bit_name) in enumerate(zip(flags, bit_names), start=1):
-            if idx >= len(subs):        # spare bits beyond defined subs
+            if idx >= len(subs):
                 break
             if not present:
                 continue
@@ -184,12 +185,6 @@ class Cat62Decoder:
 
         return out
 
-    
-    def pprint(self, records):
-        for record in records:
-            for reference_number, data_item in record.items():
-                print(self.SPEC.items[reference_number])
-                print(reference_number, data_item)
     
     # ─────────────────────────── pretty tree ────────────────────────────
     def pretty(self, records, indent=2):
