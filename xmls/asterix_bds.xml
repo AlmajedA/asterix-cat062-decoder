@@ -1,15 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE Category SYSTEM "asterix.dtd">
 
-<!--  
-
-    Mode S BDS registers definition 
-    
-    Author:   dsalantic
-    Created:  5.5.2016.
-    Modified: 2.2.2018. 	dmarkus		BDS4,4 and BDS4,5 added
---> 
-
 <Category id="BDS" name="BDS" ver="1.0">
 
     <DataItem id="40">

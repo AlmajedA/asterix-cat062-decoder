@@ -1,13 +1,10 @@
-# spec.py  – full version with full_name for Data Items *and* Bits  ─────────
 import xml.etree.ElementTree as ET
-
 
 def _extract_bits(fx):
     """Return list of dicts for each <Bits> element under one <Fixed> node."""
     bits = []
     for b in fx.findall(".//Bits"):
 
-        # bit positions (ASTERNIX numbering)
         if "bit" in b.attrib:
             start = end = int(b.attrib["bit"])
         else:

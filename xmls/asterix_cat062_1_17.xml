@@ -2427,7 +2427,83 @@
                 </Fixed>
 
                 <Repetitive>
-                    <BDS/>
+                    <Fixed length="8">
+                        <Bits bit="64">
+                            <BitsShortName>MCP_ALT_STATUS</BitsShortName>
+                            <BitsName>MCP Altitude Status</BitsName>
+                        </Bits>
+                        <Bits from="63" to="52" encode="unsigned">
+                            <BitsShortName>MCP_ALT</BitsShortName>
+                            <BitsName>MCP/FCU Selected Altitude</BitsName>
+                            <BitsUnit scale="16">ft</BitsUnit>
+                        </Bits>
+                        <Bits bit="51">
+                            <BitsShortName>FMS_ALT_STATUS</BitsShortName>
+                            <BitsName>FMS Altitude Status</BitsName>
+                        </Bits>
+                        <Bits from="50" to="39" encode="unsigned">
+                            <BitsShortName>FMS_ALT</BitsShortName>
+                            <BitsName>FMS Selected Altitude</BitsName>
+                            <BitsUnit scale="16">ft</BitsUnit>
+                        </Bits>
+                        <Bits bit="38">
+                            <BitsShortName>BP_STATUS</BitsShortName>
+                            <BitsName>Barometric Pressure Status</BitsName>
+                        </Bits>
+                        <Bits from="37" to="26" encode="unsigned">
+                            <BitsShortName>BP</BitsShortName>
+                            <BitsName>Barometric Pressure</BitsName>
+                            <BitsUnit scale="0.1">mb</BitsUnit>
+                        </Bits>
+                        <Bits from="25" to="18">
+                            <BitsShortName>res1</BitsShortName>
+                            <BitsName>Reserved 1</BitsName>
+                        </Bits>
+                        <Bits bit="17">
+                            <BitsShortName>MODE_STATUS</BitsShortName>
+                            <BitsName>Status of MCP/FCU Mode Bits</BitsName>
+                        </Bits>
+                        <Bits bit="16">
+                            <BitsShortName>VNAV</BitsShortName>
+                            <BitsName>VNAV Mode</BitsName>
+                            <BitsValue val="0">Not active</BitsValue>
+                            <BitsValue val="1">Active</BitsValue>
+                        </Bits>
+                        <Bits bit="15">
+                            <BitsShortName>ALT_HOLD</BitsShortName>
+                            <BitsName>ALT HOLD Mode</BitsName>
+                            <BitsValue val="0">Not active</BitsValue>
+                            <BitsValue val="1">Active</BitsValue>
+                        </Bits>
+                        <Bits bit="14">
+                            <BitsShortName>APP</BitsShortName>
+                            <BitsName>APPROACH Mode</BitsName>
+                            <BitsValue val="0">Not active</BitsValue>
+                            <BitsValue val="1">Active</BitsValue>
+                        </Bits>
+                        <Bits from="13" to="12">
+                            <BitsShortName>res2</BitsShortName>
+                            <BitsName>Reserved 2</BitsName>
+                        </Bits>
+                        <Bits bit="11">
+                            <BitsShortName>TARGET_ALT_STATUS</BitsShortName>
+                            <BitsName>Status of Target ALT source bits</BitsName>
+                            <BitsValue val="0">No source information provided</BitsValue>
+                            <BitsValue val="1">Source information deliberately provided</BitsValue>
+                        </Bits>
+                        <Bits from="10" to="9">
+                            <BitsShortName>TARGET_ALT_SOURCE</BitsShortName>
+                            <BitsName>Target ALT source</BitsName>
+                            <BitsValue val="0">Unknown</BitsValue>
+                            <BitsValue val="1">Aircraft Altitude</BitsValue>
+                            <BitsValue val="2">FCU/MCP selected altitude</BitsValue>
+                            <BitsValue val="3">FMS selected altitude</BitsValue>
+                        </Bits>
+                        <Bits from="8" to="1" encode="hex">
+                            <BitsShortName>BDS</BitsShortName>
+                            <BitsName>BDS register</BitsName>
+                        </Bits>
+                    </Fixed>
                 </Repetitive>
 
                 <Fixed length="2">
